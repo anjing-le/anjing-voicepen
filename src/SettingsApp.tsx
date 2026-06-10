@@ -7,10 +7,10 @@ import type { AppConfig, ThemeMode } from "./types";
 const defaultConfig: AppConfig = {
   stt_base_url: "",
   stt_api_key: "",
-  stt_model: "whisper-1",
+  stt_model: "",
   llm_base_url: "",
   llm_api_key: "",
-  llm_model: "gpt-4o-mini",
+  llm_model: "",
   polish_prompt:
     "请将下面的语音转写文本润色成自然、清晰、可直接发送的中文。保留原意，不扩写，不加入新信息，不解释，只输出润色后的正文。",
   shortcut: "Alt+Shift+V",
@@ -128,7 +128,7 @@ export default function SettingsApp() {
             <input
               value={config.stt_model}
               onChange={(event) => update("stt_model", event.target.value)}
-              placeholder="whisper-1"
+              placeholder="输入你的 STT Model"
               autoComplete="off"
             />
           </label>
@@ -162,7 +162,7 @@ export default function SettingsApp() {
             <input
               value={config.llm_model}
               onChange={(event) => update("llm_model", event.target.value)}
-              placeholder="gpt-4o-mini"
+              placeholder="输入你的 LLM Model"
               autoComplete="off"
             />
           </label>

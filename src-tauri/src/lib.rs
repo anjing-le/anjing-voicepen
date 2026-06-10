@@ -125,11 +125,11 @@ impl AppConfig {
 }
 
 fn default_stt_model() -> String {
-    "whisper-1".to_string()
+    String::new()
 }
 
 fn default_llm_model() -> String {
-    "gpt-4o-mini".to_string()
+    String::new()
 }
 
 fn default_prompt() -> String {
