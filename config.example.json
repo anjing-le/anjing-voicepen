@@ -1,0 +1,12 @@
+{
+  "stt_base_url": "https://api.openai.com",
+  "stt_api_key": "sk-your-stt-key",
+  "stt_model": "whisper-1",
+  "llm_base_url": "https://api.openai.com",
+  "llm_api_key": "sk-your-llm-key",
+  "llm_model": "gpt-4o-mini",
+  "polish_prompt": "请将下面的语音转写文本润色成自然、清晰、可直接发送的中文。保留原意，不扩写，不加入新信息，不解释，只输出润色后的正文。",
+  "shortcut": "Alt+Shift+V",
+  "auto_paste": false,
+  "theme": "system"
+}
