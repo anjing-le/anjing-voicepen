@@ -12,15 +12,17 @@ use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     window::Color,
-    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 mod config;
+mod diagnostics;
 mod provider;
 mod runtime;
 
 use config::{config_path, read_config_file, write_config_file, AppConfig, ConfigPayload};
+use diagnostics::{test_llm, test_stt, DiagnosticResult};
 use provider::OpenAiCompatibleProvider;
 use runtime::{OperationToken, RuntimeSnapshot, RuntimeStage, RuntimeState, ShortcutDecision};
 
@@ -56,7 +58,9 @@ impl Recorder {
         }
 
         let host = cpal::default_host();
-        let device = host.default_input_device().ok_or("未找到麦克风输入设备")?;
+        let device = host
+            .default_input_device()
+            .ok_or("未找到可用麦克风，请检查设备连接与系统麦克风权限。")?;
         let supported_config = device
             .default_input_config()
             .map_err(|e| format!("获取麦克风默认配置失败：{e}"))?;
@@ -129,7 +133,7 @@ impl Recorder {
             .clone();
 
         if self.sample_rate == 0 || raw_samples.is_empty() {
-            return Err("录音数据为空，请检查麦克风权限。".to_string());
+            return Err("没有收到音频数据，请检查麦克风权限、默认输入设备或设备占用。".to_string());
         }
 
         let duration_ms = ((raw_samples.len() as f64 / self.sample_rate as f64) * 1000.0) as u64;
@@ -363,6 +367,73 @@ fn copy_text(text: String) -> Result<(), String> {
 #[tauri::command]
 fn paste_clipboard() -> Result<(), String> {
     trigger_paste()
+}
+
+#[tauri::command]
+fn open_microphone_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return open_system_settings(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+    );
+
+    #[cfg(target_os = "windows")]
+    return open_system_settings("ms-settings:privacy-microphone");
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Err("请在系统设置中手动打开麦克风权限。".to_string())
+}
+
+#[tauri::command]
+fn open_accessibility_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return open_system_settings(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+    );
+
+    #[cfg(not(target_os = "macos"))]
+    Err("当前平台不需要 macOS 辅助功能设置。".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn open_system_settings(target: &str) -> Result<(), String> {
+    let status = Command::new("open")
+        .arg(target)
+        .status()
+        .map_err(|error| format!("打开系统设置失败：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("系统设置未能打开，请手动前往隐私与安全性设置。".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_system_settings(target: &str) -> Result<(), String> {
+    let status = Command::new("explorer.exe")
+        .arg(target)
+        .status()
+        .map_err(|error| format!("打开系统设置失败：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("系统设置未能打开，请手动前往麦克风隐私设置。".to_string())
+    }
+}
+
+#[tauri::command]
+async fn test_stt_connection(
+    state: State<'_, SharedState>,
+    config: AppConfig,
+) -> Result<DiagnosticResult, String> {
+    Ok(test_stt(&state.client, &config.normalize()).await)
+}
+
+#[tauri::command]
+async fn test_llm_connection(
+    state: State<'_, SharedState>,
+    config: AppConfig,
+) -> Result<DiagnosticResult, String> {
+    Ok(test_llm(&state.client, &config.normalize()).await)
 }
 
 fn config_payload(state: &SharedState, config: AppConfig) -> ConfigPayload {
@@ -777,7 +848,7 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
     let window = if let Some(window) = app.get_webview_window("settings") {
         window
     } else {
-        WebviewWindowBuilder::new(app, "settings", frontend_url("settings"))
+        let window = WebviewWindowBuilder::new(app, "settings", frontend_url("settings"))
             .title("VoicePen 设置")
             .inner_size(720.0, 760.0)
             .min_inner_size(620.0, 620.0)
@@ -786,7 +857,15 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
             .transparent(false)
             .resizable(true)
             .build()
-            .map_err(|e| format!("创建设置窗口失败：{e}"))?
+            .map_err(|e| format!("创建设置窗口失败：{e}"))?;
+        let window_to_hide = window.clone();
+        window.on_window_event(move |event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window_to_hide.hide();
+            }
+        });
+        window
     };
 
     window
@@ -882,7 +961,11 @@ pub fn run() {
             show_settings,
             hide_settings,
             copy_text,
-            paste_clipboard
+            paste_clipboard,
+            test_stt_connection,
+            test_llm_connection,
+            open_microphone_settings,
+            open_accessibility_settings
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -894,14 +977,15 @@ pub fn run() {
                 .lock()
                 .map(|config| config.clone())
                 .unwrap_or_default();
-            register_shortcut(&handle, &state, &config.shortcut)
-                .expect("注册 VoicePen 全局快捷键失败");
+            let mut startup_errors = Vec::new();
+            if let Err(error) = register_shortcut(&handle, &state, &config.shortcut) {
+                startup_errors.push(error);
+            }
             if let Some(error) = config_load_error.as_deref() {
-                reject_runtime(
-                    &handle,
-                    &state,
-                    format!("恢复本地配置失败：{error}。请检查配置目录后重试。"),
-                );
+                startup_errors.push(format!("恢复本地配置失败：{error}。请检查配置目录后重试。"));
+            }
+            if !startup_errors.is_empty() {
+                reject_runtime(&handle, &state, startup_errors.join("；"));
                 let _ = show_settings_window(&handle);
             }
             Ok(())

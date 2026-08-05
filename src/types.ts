@@ -29,6 +29,14 @@ export interface ConfigPayload {
   config_path: string;
 }
 
+export type DiagnosticService = "stt" | "llm";
+
+export interface DiagnosticResult {
+  service: DiagnosticService;
+  success: boolean;
+  message: string;
+}
+
 export type RuntimeStage = "idle" | "recording" | "transcribing" | "polishing" | "done" | "error";
 
 export interface RuntimeSnapshot {

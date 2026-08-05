@@ -127,6 +127,40 @@ impl<'a> OpenAiCompatibleProvider<'a> {
         })?;
         parse_chat_response(&bytes)
     }
+
+    pub(crate) async fn test_completion(
+        &self,
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+    ) -> Result<String, ProviderError> {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                { "role": "system", "content": "这是连接测试。只回复 OK。" },
+                { "role": "user", "content": "ping" }
+            ],
+            "temperature": 0.2
+        });
+        let response = self
+            .client
+            .post(openai_endpoint(base_url, "chat/completions"))
+            .bearer_auth(api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| request_error("LLM 连接测试失败", &error))?;
+        if !response.status().is_success() {
+            return Err(http_error("LLM 连接测试失败", response));
+        }
+        let bytes = response.bytes().await.map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidResponse,
+                "读取 LLM 测试响应失败，请重试。",
+            )
+        })?;
+        parse_chat_response(&bytes)
+    }
 }
 
 #[derive(Debug, Deserialize)]

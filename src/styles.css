@@ -353,6 +353,91 @@ textarea:focus {
   border-color: color-mix(in srgb, var(--vp-accent) 38%, var(--vp-border));
 }
 
+.ghost-button:disabled {
+  cursor: default;
+  opacity: 0.64;
+}
+
+.diagnostic-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 14px;
+  align-items: center;
+  border-radius: var(--vp-radius);
+  padding: 10px 11px;
+  background: color-mix(in srgb, var(--vp-bg) 58%, var(--vp-surface-solid));
+}
+
+.diagnostic-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.diagnostic-copy > span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.diagnostic-copy small {
+  color: var(--vp-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.diagnostic-button {
+  height: 36px;
+  padding: 0 12px;
+}
+
+.diagnostic-result {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  border-top: 1px solid var(--vp-border);
+  padding-top: 9px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.diagnostic-result svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.diagnostic-result.success {
+  color: var(--vp-success);
+}
+
+.diagnostic-result.error {
+  color: var(--vp-danger);
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+.permissions-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.permissions-copy p {
+  margin: 0;
+  color: var(--vp-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.permissions-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .theme-switch {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -454,6 +539,15 @@ textarea:focus {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .spin,
+  .float-pill.is-recording .float-mark,
+  .float-pill.is-transcribing .float-mark svg,
+  .float-pill.is-polishing .float-mark svg {
+    animation: none;
+  }
+}
+
 @media (max-width: 680px) {
   .settings-shell {
     padding: 0;
@@ -473,6 +567,10 @@ textarea:focus {
   .span-3,
   .section-heading {
     grid-column: auto;
+  }
+
+  .diagnostic-row {
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .theme-switch {

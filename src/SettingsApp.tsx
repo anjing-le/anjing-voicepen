@@ -1,8 +1,29 @@
-import { type FormEvent, useEffect, useMemo, useState } from "react";
-import { Check, Clipboard, Copy, Moon, Save, Sun, WandSparkles, X } from "lucide-react";
-import { getConfig, hideSettings, pasteClipboard, saveConfig } from "./tauri";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Check,
+  Clipboard,
+  Copy,
+  LoaderCircle,
+  Moon,
+  Save,
+  ShieldCheck,
+  Sun,
+  WandSparkles,
+  Wifi,
+  X,
+} from "lucide-react";
+import {
+  getConfig,
+  hideSettings,
+  openAccessibilitySettings,
+  openMicrophoneSettings,
+  pasteClipboard,
+  saveConfig,
+  testLlmConnection,
+  testSttConnection,
+} from "./tauri";
 import { applyTheme } from "./theme";
-import type { AppConfig, ThemeMode } from "./types";
+import type { AppConfig, DiagnosticResult, DiagnosticService, ThemeMode } from "./types";
 
 const defaultConfig: AppConfig = {
   stt_base_url: "",
@@ -31,6 +52,12 @@ export default function SettingsApp() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [testingServices, setTestingServices] = useState<Record<DiagnosticService, boolean>>({
+    stt: false,
+    llm: false,
+  });
+  const [diagnostics, setDiagnostics] = useState<Partial<Record<DiagnosticService, DiagnosticResult>>>({});
+  const diagnosticGeneration = useRef<Record<DiagnosticService, number>>({ stt: 0, llm: 0 });
 
   useEffect(() => {
     getConfig()
@@ -52,9 +79,16 @@ export default function SettingsApp() {
     () => (configured ? "VoicePen 已就绪" : "填完必要项后即可用全局快捷键录音润色"),
     [configured],
   );
+  const isMac = useMemo(() => navigator.userAgent.includes("Mac"), []);
 
   function update<K extends keyof AppConfig>(key: K, value: AppConfig[K]) {
     setConfig((current) => ({ ...current, [key]: value }));
+    const service = key.startsWith("stt_") ? "stt" : key.startsWith("llm_") ? "llm" : null;
+    if (service) {
+      diagnosticGeneration.current[service] += 1;
+      setTestingServices((current) => ({ ...current, [service]: false }));
+      setDiagnostics((current) => ({ ...current, [service]: undefined }));
+    }
   }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -86,6 +120,92 @@ export default function SettingsApp() {
     }
   }
 
+  async function openPermissionSettings(kind: "microphone" | "accessibility") {
+    setMessage("");
+    setError("");
+    try {
+      if (kind === "microphone") await openMicrophoneSettings();
+      else await openAccessibilitySettings();
+      setMessage("已打开系统权限设置。修改权限后请返回 VoicePen 重试。");
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function testConnection(service: DiagnosticService) {
+    const generation = diagnosticGeneration.current[service] + 1;
+    diagnosticGeneration.current[service] = generation;
+    setTestingServices((current) => ({ ...current, [service]: true }));
+    setDiagnostics((current) => ({ ...current, [service]: undefined }));
+    try {
+      const result =
+        service === "stt" ? await testSttConnection(config) : await testLlmConnection(config);
+      if (diagnosticGeneration.current[service] !== generation) return;
+      setDiagnostics((current) => ({
+        ...current,
+        [service]: { ...result, message: redactApiKeys(result.message) },
+      }));
+    } catch (err) {
+      if (diagnosticGeneration.current[service] !== generation) return;
+      setDiagnostics((current) => ({
+        ...current,
+        [service]: {
+          service,
+          success: false,
+          message: redactApiKeys(String(err)),
+        },
+      }));
+    } finally {
+      if (diagnosticGeneration.current[service] === generation) {
+        setTestingServices((current) => ({ ...current, [service]: false }));
+      }
+    }
+  }
+
+  function redactApiKeys(value: string) {
+    return [config.stt_api_key, config.llm_api_key]
+      .filter((key) => key.length > 0)
+      .reduce((messageValue, key) => messageValue.split(key).join("[API Key 已隐藏]"), value);
+  }
+
+  function renderDiagnostic(service: DiagnosticService) {
+    const result = diagnostics[service];
+    const testing = testingServices[service];
+    const isStt = service === "stt";
+
+    return (
+      <div className="diagnostic-row span-3">
+        <div className="diagnostic-copy">
+          <span>{isStt ? "测试 STT 配置" : "测试 LLM 配置"}</span>
+          <small>
+            {isStt
+              ? "会联网检查当前填写的配置，不会启动录音。"
+              : "会联网并发起一次简短的 API 调用，实际计费由服务商决定。"}
+          </small>
+        </div>
+        <button
+          className="ghost-button diagnostic-button"
+          type="button"
+          disabled={testing}
+          onClick={() => void testConnection(service)}
+        >
+          {testing ? <LoaderCircle className="spin" size={16} /> : <Wifi size={16} />}
+          <span>{testing ? "测试中" : "测试连接"}</span>
+        </button>
+        {result && (
+          <div
+            className={`diagnostic-result ${result.success ? "success" : "error"}`}
+            role="status"
+            aria-live="polite"
+          >
+            {result.success ? <Check size={15} /> : <X size={15} />}
+            <span>{result.message}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <main className="settings-shell">
       <form className="settings-panel" onSubmit={onSubmit}>
@@ -95,7 +215,12 @@ export default function SettingsApp() {
             <h1>{title}</h1>
             <p className="subtle">{subtitle}</p>
           </div>
-          <button className="icon-button" type="button" onClick={() => void hideSettings()}>
+          <button
+            className="icon-button"
+            type="button"
+            onClick={() => void hideSettings()}
+            aria-label="关闭设置"
+          >
             <X size={18} />
           </button>
         </header>
@@ -132,6 +257,7 @@ export default function SettingsApp() {
               autoComplete="off"
             />
           </label>
+          {renderDiagnostic("stt")}
         </section>
 
         <section className="section-grid">
@@ -166,6 +292,7 @@ export default function SettingsApp() {
               autoComplete="off"
             />
           </label>
+          {renderDiagnostic("llm")}
         </section>
 
         <section className="section-grid prompt-section">
@@ -220,11 +347,43 @@ export default function SettingsApp() {
                 type="button"
                 key={item.value}
                 onClick={() => update("theme", item.value)}
+                aria-pressed={config.theme === item.value}
               >
                 <item.icon size={16} />
                 <span>{item.label}</span>
               </button>
             ))}
+          </div>
+        </section>
+
+        <section className="section-grid compact-section">
+          <div className="section-heading">
+            <h2>权限</h2>
+          </div>
+          <div className="permissions-copy span-3">
+            <p>
+              麦克风权限是录音必需项；拒绝后无法转写。自动粘贴权限是可选项；拒绝后结果仍会保留在剪贴板，可手动粘贴。
+            </p>
+            <div className="permissions-actions">
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => void openPermissionSettings("microphone")}
+              >
+                <ShieldCheck size={16} />
+                <span>麦克风权限</span>
+              </button>
+              {isMac && (
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={() => void openPermissionSettings("accessibility")}
+                >
+                  <ShieldCheck size={16} />
+                  <span>自动粘贴权限</span>
+                </button>
+              )}
+            </div>
           </div>
         </section>
 
