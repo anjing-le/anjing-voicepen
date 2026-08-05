@@ -37,6 +37,25 @@ export interface DiagnosticResult {
   message: string;
 }
 
+export type UpdateStage =
+  | "idle"
+  | "checking"
+  | "up_to_date"
+  | "available"
+  | "installing"
+  | "restart_required"
+  | "error";
+
+export interface UpdateSnapshot {
+  stage: UpdateStage;
+  current_version: string;
+  available_version: string | null;
+  published_at: string | null;
+  notes: string | null;
+  message: string;
+  can_install: boolean;
+}
+
 export type RuntimeStage = "idle" | "recording" | "transcribing" | "polishing" | "done" | "error";
 
 export interface RuntimeSnapshot {

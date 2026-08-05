@@ -20,6 +20,7 @@ mod config;
 mod diagnostics;
 mod provider;
 mod runtime;
+mod update;
 
 use config::{config_path, read_config_file, write_config_file, AppConfig, ConfigPayload};
 use diagnostics::{test_llm, test_stt, DiagnosticResult};
@@ -944,6 +945,7 @@ pub fn run() {
     let shortcut_state = Arc::clone(&state);
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, _shortcut, event| {
@@ -965,10 +967,18 @@ pub fn run() {
             test_stt_connection,
             test_llm_connection,
             open_microphone_settings,
-            open_accessibility_settings
+            open_accessibility_settings,
+            update::get_update_snapshot,
+            update::check_for_update,
+            update::install_update,
+            update::dismiss_update
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            app.manage(update::UpdateState::new(
+                app.package_info().version.to_string(),
+            ));
+            update::spawn_startup_check(handle.clone());
             create_float_window(&handle).expect("创建 VoicePen 浮窗失败");
             create_tray(&handle)?;
 

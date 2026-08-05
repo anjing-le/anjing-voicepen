@@ -1,5 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppConfig, ConfigPayload, DiagnosticResult, RuntimeSnapshot } from "./types";
+import type {
+  AppConfig,
+  ConfigPayload,
+  DiagnosticResult,
+  RuntimeSnapshot,
+  UpdateSnapshot,
+} from "./types";
 
 export function getConfig(): Promise<ConfigPayload> {
   return invoke("get_config");
@@ -43,4 +49,20 @@ export function openMicrophoneSettings(): Promise<void> {
 
 export function openAccessibilitySettings(): Promise<void> {
   return invoke("open_accessibility_settings");
+}
+
+export function getUpdateSnapshot(): Promise<UpdateSnapshot> {
+  return invoke("get_update_snapshot");
+}
+
+export function checkForUpdate(): Promise<UpdateSnapshot> {
+  return invoke("check_for_update");
+}
+
+export function installUpdate(): Promise<UpdateSnapshot> {
+  return invoke("install_update");
+}
+
+export function dismissUpdate(): Promise<UpdateSnapshot> {
+  return invoke("dismiss_update");
 }

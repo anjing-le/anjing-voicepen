@@ -438,6 +438,118 @@ textarea:focus {
   gap: 8px;
 }
 
+.update-section {
+  align-items: start;
+}
+
+.update-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.update-summary,
+.update-release-heading,
+.update-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.update-summary > div,
+.update-release-heading > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.update-summary strong,
+.update-release-heading strong {
+  overflow-wrap: anywhere;
+  font-size: 15px;
+}
+
+.update-label {
+  color: var(--vp-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.update-check-button {
+  height: 36px;
+  padding: 0 12px;
+}
+
+.update-release {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--vp-accent) 30%, var(--vp-border));
+  border-radius: var(--vp-radius);
+  padding: 12px;
+  background: var(--vp-accent-soft);
+}
+
+.update-release-heading time {
+  color: var(--vp-muted);
+  font-size: 11px;
+}
+
+.update-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border-top: 1px solid var(--vp-border);
+  padding-top: 10px;
+}
+
+.update-notes p {
+  max-height: 180px;
+  overflow: auto;
+  color: var(--vp-text);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.update-actions {
+  justify-content: flex-end;
+}
+
+.update-actions .ghost-button,
+.update-install-button {
+  min-width: 104px;
+  padding: 0 14px;
+}
+
+.update-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: var(--vp-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.update-status svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.update-status.error {
+  color: var(--vp-danger);
+}
+
+.update-consent-note {
+  color: var(--vp-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .theme-switch {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -575,6 +687,11 @@ textarea:focus {
 
   .theme-switch {
     grid-template-columns: 1fr;
+  }
+
+  .update-summary,
+  .update-release-heading {
+    align-items: flex-start;
   }
 
   .settings-footer {

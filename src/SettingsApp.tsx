@@ -1,6 +1,8 @@
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   Check,
+  CircleArrowDown,
   Clipboard,
   Copy,
   LoaderCircle,
@@ -8,22 +10,33 @@ import {
   Save,
   ShieldCheck,
   Sun,
+  RefreshCw,
   WandSparkles,
   Wifi,
   X,
 } from "lucide-react";
 import {
   getConfig,
+  getUpdateSnapshot,
   hideSettings,
   openAccessibilitySettings,
   openMicrophoneSettings,
   pasteClipboard,
   saveConfig,
+  checkForUpdate,
+  dismissUpdate,
+  installUpdate,
   testLlmConnection,
   testSttConnection,
 } from "./tauri";
 import { applyTheme } from "./theme";
-import type { AppConfig, DiagnosticResult, DiagnosticService, ThemeMode } from "./types";
+import type {
+  AppConfig,
+  DiagnosticResult,
+  DiagnosticService,
+  ThemeMode,
+  UpdateSnapshot,
+} from "./types";
 
 const defaultConfig: AppConfig = {
   stt_base_url: "",
@@ -45,6 +58,16 @@ const themeOptions: Array<{ value: ThemeMode; label: string; icon: typeof Sun }>
   { value: "system", label: "System", icon: WandSparkles },
 ];
 
+const initialUpdateSnapshot: UpdateSnapshot = {
+  stage: "idle",
+  current_version: "—",
+  available_version: null,
+  published_at: null,
+  notes: null,
+  message: "可手动检查 GitHub Releases 中的正式版本。",
+  can_install: false,
+};
+
 export default function SettingsApp() {
   const [config, setConfig] = useState<AppConfig>(defaultConfig);
   const [configured, setConfigured] = useState(false);
@@ -58,6 +81,8 @@ export default function SettingsApp() {
   });
   const [diagnostics, setDiagnostics] = useState<Partial<Record<DiagnosticService, DiagnosticResult>>>({});
   const diagnosticGeneration = useRef<Record<DiagnosticService, number>>({ stt: 0, llm: 0 });
+  const [updateSnapshot, setUpdateSnapshot] = useState<UpdateSnapshot>(initialUpdateSnapshot);
+  const [updateActionError, setUpdateActionError] = useState("");
 
   useEffect(() => {
     getConfig()
@@ -68,6 +93,38 @@ export default function SettingsApp() {
         applyTheme(payload.config.theme);
       })
       .catch((err) => setError(String(err)));
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let stopListening: (() => void) | undefined;
+    let receivedEvent = false;
+
+    void (async () => {
+      try {
+        const unlisten = await listen<UpdateSnapshot>("update-status", (event) => {
+          if (disposed) return;
+          receivedEvent = true;
+          setUpdateActionError("");
+          setUpdateSnapshot(event.payload);
+        });
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        stopListening = unlisten;
+
+        const snapshot = await getUpdateSnapshot();
+        if (!disposed && !receivedEvent) setUpdateSnapshot(snapshot);
+      } catch (err) {
+        if (!disposed) setUpdateActionError(String(err));
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      stopListening?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -166,6 +223,47 @@ export default function SettingsApp() {
     return [config.stt_api_key, config.llm_api_key]
       .filter((key) => key.length > 0)
       .reduce((messageValue, key) => messageValue.split(key).join("[API Key 已隐藏]"), value);
+  }
+
+  async function runUpdateAction(action: "check" | "install" | "dismiss") {
+    setUpdateActionError("");
+    try {
+      if (action === "check") {
+        setUpdateSnapshot((current) => ({
+          ...current,
+          stage: "checking",
+          message: "正在检查 GitHub Releases…",
+        }));
+        setUpdateSnapshot(await checkForUpdate());
+      } else if (action === "install") {
+        setUpdateSnapshot((current) => ({
+          ...current,
+          stage: "installing",
+          message: "正在下载并安装更新，请保持 VoicePen 运行。",
+        }));
+        setUpdateSnapshot(await installUpdate());
+      } else {
+        setUpdateSnapshot(await dismissUpdate());
+      }
+    } catch (err) {
+      setUpdateActionError(String(err));
+      setUpdateSnapshot((current) => ({
+        ...current,
+        stage: "error",
+        message: "更新操作未完成，当前版本仍可继续使用。",
+      }));
+    }
+  }
+
+  function formatReleaseDate(value: string | null) {
+    if (!value) return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return new Intl.DateTimeFormat("zh-CN", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    }).format(date);
   }
 
   function renderDiagnostic(service: DiagnosticService) {
@@ -384,6 +482,88 @@ export default function SettingsApp() {
                 </button>
               )}
             </div>
+          </div>
+        </section>
+
+        <section className="section-grid update-section">
+          <div className="section-heading">
+            <h2>更新</h2>
+          </div>
+          <div className="update-panel span-3" aria-busy={updateSnapshot.stage === "checking" || updateSnapshot.stage === "installing"}>
+            <div className="update-summary">
+              <div>
+                <span className="update-label">当前版本</span>
+                <strong>v{updateSnapshot.current_version}</strong>
+              </div>
+              <button
+                className="ghost-button update-check-button"
+                type="button"
+                disabled={updateSnapshot.stage === "checking" || updateSnapshot.stage === "installing"}
+                onClick={() => void runUpdateAction("check")}
+              >
+                <RefreshCw className={updateSnapshot.stage === "checking" ? "spin" : undefined} size={16} />
+                <span>{updateSnapshot.stage === "checking" ? "检查中" : "检查更新"}</span>
+              </button>
+            </div>
+
+            {updateSnapshot.available_version && (
+              <div className="update-release">
+                <div className="update-release-heading">
+                  <div>
+                    <span className="update-label">发现新版本</span>
+                    <strong>v{updateSnapshot.available_version}</strong>
+                  </div>
+                  {formatReleaseDate(updateSnapshot.published_at) && (
+                    <time dateTime={updateSnapshot.published_at ?? undefined}>
+                      {formatReleaseDate(updateSnapshot.published_at)}
+                    </time>
+                  )}
+                </div>
+                <div className="update-notes" aria-label="版本更新要点">
+                  <span className="update-label">更新要点</span>
+                  <p>{updateSnapshot.notes?.trim() || "此版本暂未提供更新说明。"}</p>
+                </div>
+                <div className="update-actions">
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    disabled={updateSnapshot.stage === "installing"}
+                    onClick={() => void runUpdateAction("dismiss")}
+                  >
+                    稍后
+                  </button>
+                  <button
+                    className="primary-button update-install-button"
+                    type="button"
+                    disabled={!updateSnapshot.can_install || updateSnapshot.stage === "installing"}
+                    onClick={() => void runUpdateAction("install")}
+                  >
+                    {updateSnapshot.stage === "installing" ? (
+                      <LoaderCircle className="spin" size={16} />
+                    ) : (
+                      <CircleArrowDown size={16} />
+                    )}
+                    <span>{updateSnapshot.stage === "installing" ? "正在更新" : "立即更新"}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div
+              className={`update-status ${updateSnapshot.stage === "error" || updateActionError ? "error" : ""}`}
+              role="status"
+              aria-live="polite"
+            >
+              {updateSnapshot.stage === "checking" || updateSnapshot.stage === "installing" ? (
+                <LoaderCircle className="spin" size={15} />
+              ) : updateSnapshot.stage === "error" || updateActionError ? (
+                <X size={15} />
+              ) : (
+                <Check size={15} />
+              )}
+              <span>{updateActionError || updateSnapshot.message}</span>
+            </div>
+            <p className="update-consent-note">只有点击“立即更新”后才会下载和安装；检查更新不会下载安装包。</p>
           </div>
         </section>
 
