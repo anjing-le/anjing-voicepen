@@ -35,7 +35,7 @@ Rust 应用核心
 
 ## 3. 核心状态机
 
-运行态至少区分：`idle`、`recording`、`transcribing`、`polishing`、`done`、`error`。后续实现必须满足：
+运行态至少区分：`idle`、`recording`、`transcribing`、`polishing`、`done`、`error`。核心可以使用内部 `completing` lease 保护剪贴板和粘贴副作用，但对前端仍稳定序列化为 `polishing`。后续实现必须满足：
 
 - 同一时刻只有一次录音或处理管线拥有执行权。
 - 处理期间的重复快捷键不会启动第二条管线或覆盖有效结果。

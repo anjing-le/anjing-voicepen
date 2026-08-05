@@ -1,14 +1,13 @@
 use std::{
-    fs,
     io::Cursor,
     path::PathBuf,
     process::Command,
     sync::{Arc, Mutex},
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use serde::{Deserialize, Serialize};
 use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -17,180 +16,20 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-const DEFAULT_SHORTCUT: &str = "Alt+Shift+V";
-const DEFAULT_PROMPT: &str =
-    "请将下面的语音转写文本润色成自然、清晰、可直接发送的中文。保留原意，不扩写，不加入新信息，不解释，只输出润色后的正文。";
+mod config;
+mod provider;
+mod runtime;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppConfig {
-    #[serde(default)]
-    pub stt_base_url: String,
-    #[serde(default)]
-    pub stt_api_key: String,
-    #[serde(default = "default_stt_model")]
-    pub stt_model: String,
-    #[serde(default)]
-    pub llm_base_url: String,
-    #[serde(default)]
-    pub llm_api_key: String,
-    #[serde(default = "default_llm_model")]
-    pub llm_model: String,
-    #[serde(default = "default_prompt")]
-    pub polish_prompt: String,
-    #[serde(default = "default_shortcut")]
-    pub shortcut: String,
-    #[serde(default)]
-    pub auto_paste: bool,
-    #[serde(default = "default_theme")]
-    pub theme: String,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            stt_base_url: String::new(),
-            stt_api_key: String::new(),
-            stt_model: default_stt_model(),
-            llm_base_url: String::new(),
-            llm_api_key: String::new(),
-            llm_model: default_llm_model(),
-            polish_prompt: default_prompt(),
-            shortcut: default_shortcut(),
-            auto_paste: false,
-            theme: default_theme(),
-        }
-    }
-}
-
-impl AppConfig {
-    fn normalize(mut self) -> Self {
-        self.stt_base_url = normalize_base_url(&self.stt_base_url);
-        self.llm_base_url = normalize_base_url(&self.llm_base_url);
-        self.stt_api_key = self.stt_api_key.trim().to_string();
-        self.llm_api_key = self.llm_api_key.trim().to_string();
-        self.stt_model = self.stt_model.trim().to_string();
-        self.llm_model = self.llm_model.trim().to_string();
-        self.shortcut = self.shortcut.trim().to_string();
-        if self.shortcut.is_empty() {
-            self.shortcut = default_shortcut();
-        }
-        if self.polish_prompt.trim().is_empty() {
-            self.polish_prompt = default_prompt();
-        } else {
-            self.polish_prompt = self.polish_prompt.trim().to_string();
-        }
-        if !matches!(self.theme.as_str(), "light" | "dark" | "system") {
-            self.theme = default_theme();
-        }
-        self
-    }
-
-    fn is_configured(&self) -> bool {
-        !self.stt_base_url.trim().is_empty()
-            && !self.stt_api_key.trim().is_empty()
-            && !self.stt_model.trim().is_empty()
-            && !self.llm_base_url.trim().is_empty()
-            && !self.llm_api_key.trim().is_empty()
-            && !self.llm_model.trim().is_empty()
-    }
-
-    fn validate(&self) -> Result<(), String> {
-        let mut missing = Vec::new();
-        if self.stt_base_url.is_empty() {
-            missing.push("STT Base URL");
-        }
-        if self.stt_api_key.is_empty() {
-            missing.push("STT API Key");
-        }
-        if self.stt_model.is_empty() {
-            missing.push("STT Model");
-        }
-        if self.llm_base_url.is_empty() {
-            missing.push("LLM Base URL");
-        }
-        if self.llm_api_key.is_empty() {
-            missing.push("LLM API Key");
-        }
-        if self.llm_model.is_empty() {
-            missing.push("LLM Model");
-        }
-        if !missing.is_empty() {
-            return Err(format!("请补充必要配置：{}", missing.join("、")));
-        }
-        self.shortcut
-            .parse::<Shortcut>()
-            .map_err(|e| format!("快捷键格式无效：{e}"))?;
-        Ok(())
-    }
-}
-
-fn default_stt_model() -> String {
-    String::new()
-}
-
-fn default_llm_model() -> String {
-    String::new()
-}
-
-fn default_prompt() -> String {
-    DEFAULT_PROMPT.to_string()
-}
-
-fn default_shortcut() -> String {
-    DEFAULT_SHORTCUT.to_string()
-}
-
-fn default_theme() -> String {
-    "system".to_string()
-}
-
-fn normalize_base_url(value: &str) -> String {
-    value.trim().trim_end_matches('/').to_string()
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ConfigPayload {
-    pub config: AppConfig,
-    pub configured: bool,
-    pub config_path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RuntimeSnapshot {
-    pub stage: String,
-    pub message: String,
-    pub configured: bool,
-    pub shortcut: String,
-    pub auto_paste: bool,
-    pub theme: String,
-    pub transcript: Option<String>,
-    pub polished: Option<String>,
-}
-
-impl RuntimeSnapshot {
-    fn idle(config: &AppConfig) -> Self {
-        Self {
-            stage: "idle".to_string(),
-            message: if config.is_configured() {
-                "待命".to_string()
-            } else {
-                "请先配置".to_string()
-            },
-            configured: config.is_configured(),
-            shortcut: config.shortcut.clone(),
-            auto_paste: config.auto_paste,
-            theme: config.theme.clone(),
-            transcript: None,
-            polished: None,
-        }
-    }
-}
+use config::{config_path, read_config_file, write_config_file, AppConfig, ConfigPayload};
+use provider::OpenAiCompatibleProvider;
+use runtime::{OperationToken, RuntimeSnapshot, RuntimeStage, RuntimeState, ShortcutDecision};
 
 struct VoicePenState {
     config: Mutex<AppConfig>,
     recorder: Mutex<Recorder>,
-    runtime: Mutex<RuntimeSnapshot>,
+    runtime: Mutex<RuntimeState>,
     registered_shortcut: Mutex<Option<String>>,
+    shortcut_action: Mutex<()>,
     client: reqwest::Client,
     config_path: PathBuf,
 }
@@ -243,9 +82,7 @@ impl Recorder {
                 device.build_input_stream(
                     &stream_config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        push_mono_samples(&samples, data, channels, |s| {
-                            s as f32 / i16::MAX as f32
-                        });
+                        push_mono_samples(&samples, data, channels, |s| s as f32 / i16::MAX as f32);
                     },
                     |err| eprintln!("[VoicePen] audio input error: {err}"),
                     None,
@@ -268,9 +105,7 @@ impl Recorder {
         }
         .map_err(|e| format!("创建录音流失败：{e}"))?;
 
-        stream
-            .play()
-            .map_err(|e| format!("启动录音失败：{e}"))?;
+        stream.play().map_err(|e| format!("启动录音失败：{e}"))?;
 
         self.samples = samples;
         self.stream = Some(stream);
@@ -307,12 +142,8 @@ impl Recorder {
     }
 }
 
-fn push_mono_samples<T, F>(
-    samples: &Arc<Mutex<Vec<f32>>>,
-    data: &[T],
-    channels: usize,
-    convert: F,
-) where
+fn push_mono_samples<T, F>(samples: &Arc<Mutex<Vec<f32>>>, data: &[T], channels: usize, convert: F)
+where
     T: Copy,
     F: Fn(T) -> f32,
 {
@@ -374,21 +205,119 @@ fn save_config(
     let config = config.normalize();
     config.validate()?;
 
-    write_config_file(&state.config_path, &config)?;
-    {
-        let mut current = state
-            .config
-            .lock()
-            .map_err(|e| format!("保存配置失败：{e}"))?;
-        *current = config.clone();
+    let previous_config = state
+        .config
+        .lock()
+        .map_err(|e| format!("保存配置失败：{e}"))?
+        .clone();
+    let mut registered = state
+        .registered_shortcut
+        .lock()
+        .map_err(|e| format!("注册快捷键失败：{e}"))?;
+    let shortcut_changed = registered.as_deref() != Some(config.shortcut.as_str());
+    let previous_shortcut = registered.clone();
+    let new_shortcut = config
+        .shortcut
+        .parse::<Shortcut>()
+        .map_err(|e| format!("快捷键格式无效：{e}"))?;
+
+    if shortcut_changed {
+        if let Some(old_text) = previous_shortcut.as_deref() {
+            let old_shortcut = old_text
+                .parse::<Shortcut>()
+                .map_err(|e| format!("旧快捷键状态无效：{e}"))?;
+            app.global_shortcut()
+                .unregister(old_shortcut)
+                .map_err(|e| format!("停用旧快捷键 {old_text} 失败：{e}"))?;
+        }
+        if let Err(error) = app.global_shortcut().register(new_shortcut) {
+            let rollback =
+                restore_shortcut(&app, previous_shortcut.as_deref(), &config.shortcut, false);
+            return Err(format!(
+                "注册全局快捷键 {} 失败：{error}{}",
+                config.shortcut, rollback
+            ));
+        }
     }
 
-    register_shortcut(&app, &state, &config.shortcut)?;
-    let snapshot = RuntimeSnapshot::idle(&config);
-    set_runtime_snapshot(&app, &state, snapshot.clone());
-    let _ = app.emit("voicepen-config-saved", snapshot);
+    if let Err(error) = write_config_file(&state.config_path, &config) {
+        if shortcut_changed {
+            let rollback =
+                restore_shortcut(&app, previous_shortcut.as_deref(), &config.shortcut, true);
+            return Err(format!("{error}{rollback}"));
+        }
+        return Err(error);
+    }
+
+    let update_result = state.config.lock().map(|mut current| {
+        *current = config.clone();
+    });
+    if let Err(error) = update_result {
+        let file_rollback = write_config_file(&state.config_path, &previous_config)
+            .err()
+            .map(|rollback| format!("；恢复旧配置文件失败：{rollback}"))
+            .unwrap_or_default();
+        let shortcut_rollback = if shortcut_changed {
+            restore_shortcut(&app, previous_shortcut.as_deref(), &config.shortcut, true)
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "保存配置失败：{error}{file_rollback}{shortcut_rollback}"
+        ));
+    }
+
+    if shortcut_changed {
+        *registered = Some(config.shortcut.clone());
+    }
+    drop(registered);
+
+    let snapshot = state.runtime.lock().ok().map(|mut runtime| {
+        runtime.update_config(
+            config.is_configured(),
+            config.shortcut.clone(),
+            config.auto_paste,
+            config.theme.clone(),
+        );
+        runtime.snapshot()
+    });
+    if let Some(snapshot) = snapshot {
+        publish_snapshot(&app, snapshot.clone());
+        let _ = app.emit("voicepen-config-saved", snapshot);
+    }
 
     Ok(config_payload(&state, config))
+}
+
+fn restore_shortcut(
+    app: &AppHandle,
+    old_text: Option<&str>,
+    new_text: &str,
+    new_is_registered: bool,
+) -> String {
+    let mut failures = Vec::new();
+    if new_is_registered {
+        if let Ok(new_shortcut) = new_text.parse::<Shortcut>() {
+            if let Err(error) = app.global_shortcut().unregister(new_shortcut) {
+                failures.push(format!("停用新快捷键失败：{error}"));
+            }
+        }
+    }
+    if let Some(old_text) = old_text {
+        match old_text.parse::<Shortcut>() {
+            Ok(old_shortcut) => {
+                if let Err(error) = app.global_shortcut().register(old_shortcut) {
+                    failures.push(format!("恢复旧快捷键 {old_text} 失败：{error}"));
+                }
+            }
+            Err(error) => failures.push(format!("解析旧快捷键失败：{error}")),
+        }
+    }
+    if failures.is_empty() {
+        String::new()
+    } else {
+        format!("；{}", failures.join("；"))
+    }
 }
 
 #[tauri::command]
@@ -398,16 +327,17 @@ fn get_runtime_snapshot(state: State<'_, SharedState>) -> Result<RuntimeSnapshot
         .lock()
         .map_err(|e| format!("读取状态失败：{e}"))?
         .clone();
-    let mut snapshot = state
+    let mut runtime = state
         .runtime
         .lock()
-        .map_err(|e| format!("读取状态失败：{e}"))?
-        .clone();
-    snapshot.configured = config.is_configured();
-    snapshot.shortcut = config.shortcut;
-    snapshot.auto_paste = config.auto_paste;
-    snapshot.theme = config.theme;
-    Ok(snapshot)
+        .map_err(|e| format!("读取状态失败：{e}"))?;
+    runtime.update_config(
+        config.is_configured(),
+        config.shortcut,
+        config.auto_paste,
+        config.theme,
+    );
+    Ok(runtime.snapshot())
 }
 
 #[tauri::command]
@@ -418,7 +348,9 @@ fn show_settings(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn hide_settings(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("settings") {
-        window.hide().map_err(|e| format!("隐藏设置窗口失败：{e}"))?;
+        window
+            .hide()
+            .map_err(|e| format!("隐藏设置窗口失败：{e}"))?;
     }
     Ok(())
 }
@@ -434,49 +366,7 @@ fn paste_clipboard() -> Result<(), String> {
 }
 
 fn config_payload(state: &SharedState, config: AppConfig) -> ConfigPayload {
-    ConfigPayload {
-        configured: config.is_configured(),
-        config,
-        config_path: state.config_path.display().to_string(),
-    }
-}
-
-fn config_dir() -> Result<PathBuf, String> {
-    let base = dirs::config_dir()
-        .or_else(dirs::home_dir)
-        .ok_or("无法获取系统配置目录")?;
-    Ok(base.join("VoicePen"))
-}
-
-fn config_path() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join("config.json"))
-}
-
-fn read_config_file(path: &PathBuf) -> AppConfig {
-    let Ok(raw) = fs::read_to_string(path) else {
-        return AppConfig::default();
-    };
-    serde_json::from_str::<AppConfig>(&raw)
-        .map(AppConfig::normalize)
-        .unwrap_or_default()
-}
-
-fn write_config_file(path: &PathBuf, config: &AppConfig) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败：{e}"))?;
-    }
-
-    let data = serde_json::to_string_pretty(config).map_err(|e| format!("序列化配置失败：{e}"))?;
-    fs::write(path, data).map_err(|e| format!("写入配置文件失败：{e}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = fs::Permissions::from_mode(0o600);
-        let _ = fs::set_permissions(path, permissions);
-    }
-
-    Ok(())
+    ConfigPayload::new(config, &state.config_path)
 }
 
 fn register_shortcut(
@@ -497,124 +387,185 @@ fn register_shortcut(
         return Ok(());
     }
 
-    if let Some(old_text) = registered.take() {
+    app.global_shortcut()
+        .register(shortcut)
+        .map_err(|e| format!("注册全局快捷键 {shortcut_text} 失败：{e}"))?;
+
+    if let Some(old_text) = registered.as_deref() {
         if let Ok(old_shortcut) = old_text.parse::<Shortcut>() {
             let _ = app.global_shortcut().unregister(old_shortcut);
         }
     }
-
-    app.global_shortcut()
-        .register(shortcut)
-        .map_err(|e| format!("注册全局快捷键 {shortcut_text} 失败：{e}"))?;
     *registered = Some(shortcut_text.to_string());
     Ok(())
 }
 
 fn handle_shortcut(app: AppHandle, state: SharedState) {
+    let _action_guard = match state.shortcut_action.lock() {
+        Ok(guard) => guard,
+        Err(err) => {
+            reject_runtime(&app, &state, format!("访问快捷键状态失败：{err}"));
+            return;
+        }
+    };
     let config = match state.config.lock() {
         Ok(config) => config.clone(),
         Err(err) => {
-            emit_status(
-                &app,
-                &state,
-                "error",
-                format!("读取配置失败：{err}"),
-                None,
-                None,
-            );
+            reject_runtime(&app, &state, format!("读取配置失败：{err}"));
             return;
         }
     };
 
     if !config.is_configured() {
-        emit_status(&app, &state, "error", "请先完成 VoicePen 配置。", None, None);
+        reject_runtime(&app, &state, "请先完成 VoicePen 配置。");
         let _ = show_settings_window(&app);
         return;
     }
 
-    let mut recorder = match state.recorder.lock() {
-        Ok(recorder) => recorder,
+    let decision = match state.runtime.lock() {
+        Ok(mut runtime) => runtime.handle_shortcut(),
         Err(err) => {
-            emit_status(
-                &app,
-                &state,
-                "error",
-                format!("访问录音状态失败：{err}"),
-                None,
-                None,
+            reject_runtime(&app, &state, format!("访问运行状态失败：{err}"));
+            return;
+        }
+    };
+
+    match decision {
+        ShortcutDecision::IgnoreBusy(stage) => {
+            let message = match stage {
+                RuntimeStage::Transcribing => "正在转写，请稍候。",
+                RuntimeStage::Polishing => "正在润色，请稍候。",
+                _ => "VoicePen 正在处理，请稍候。",
+            };
+            publish_current_runtime(&app, &state, Some(message));
+        }
+        ShortcutDecision::StartRecording(token) => {
+            let result = state
+                .recorder
+                .lock()
+                .map_err(|e| format!("访问录音状态失败：{e}"))
+                .and_then(|mut recorder| recorder.start());
+            match result {
+                Ok(()) => publish_current_runtime(&app, &state, None),
+                Err(error) => fail_operation(&app, &state, token, error, None, None),
+            }
+        }
+        ShortcutDecision::StopRecording(token) => {
+            let recorded = match state
+                .recorder
+                .lock()
+                .map_err(|e| format!("访问录音状态失败：{e}"))
+                .and_then(|mut recorder| recorder.stop())
+            {
+                Ok(recorded) => recorded,
+                Err(error) => {
+                    fail_operation(&app, &state, token, error, None, None);
+                    return;
+                }
+            };
+
+            let message = format!(
+                "正在转写 {:.1} 秒语音。",
+                recorded.duration_ms as f64 / 1000.0
             );
-            return;
+            let transitioned = state
+                .runtime
+                .lock()
+                .ok()
+                .and_then(|mut runtime| runtime.begin_transcribing(token, message).ok())
+                .is_some();
+            if !transitioned {
+                return;
+            }
+            publish_current_runtime(&app, &state, None);
+            tauri::async_runtime::spawn(run_voice_pipeline(
+                app,
+                Arc::clone(&state),
+                config,
+                token,
+                recorded.bytes,
+            ));
         }
-    };
-
-    if !recorder.is_recording {
-        match recorder.start() {
-            Ok(()) => emit_status(&app, &state, "recording", "录音中，再按一次停止。", None, None),
-            Err(err) => emit_status(&app, &state, "error", err, None, None),
-        }
-        return;
     }
-
-    let recorded = match recorder.stop() {
-        Ok(recorded) => recorded,
-        Err(err) => {
-            emit_status(&app, &state, "error", err, None, None);
-            return;
-        }
-    };
-    drop(recorder);
-
-    emit_status(
-        &app,
-        &state,
-        "transcribing",
-        format!("正在转写 {:.1} 秒语音。", recorded.duration_ms as f64 / 1000.0),
-        None,
-        None,
-    );
-
-    tauri::async_runtime::spawn(run_voice_pipeline(app, state, config, recorded.bytes));
 }
 
 async fn run_voice_pipeline(
     app: AppHandle,
     state: SharedState,
     config: AppConfig,
+    token: OperationToken,
     wav_bytes: Vec<u8>,
 ) {
-    let transcript = match transcribe_openai(&state.client, &config, wav_bytes).await {
+    let provider = OpenAiCompatibleProvider::new(&state.client);
+    let transcript = match provider
+        .transcribe(
+            &config.stt_base_url,
+            &config.stt_api_key,
+            &config.stt_model,
+            wav_bytes,
+        )
+        .await
+    {
         Ok(text) => text,
         Err(err) => {
-            emit_status(&app, &state, "error", err, None, None);
+            fail_operation(&app, &state, token, err.user_message(), None, None);
             return;
         }
     };
 
-    emit_status(
-        &app,
-        &state,
-        "polishing",
-        "正在润色文字。",
-        Some(transcript.clone()),
-        None,
-    );
+    let transitioned = state
+        .runtime
+        .lock()
+        .ok()
+        .and_then(|mut runtime| runtime.begin_polishing(token, transcript.clone()).ok())
+        .is_some();
+    if !transitioned {
+        return;
+    }
+    publish_current_runtime(&app, &state, None);
 
-    let polished = match polish_openai(&state.client, &config, &transcript).await {
+    let polished = match provider
+        .polish(
+            &config.llm_base_url,
+            &config.llm_api_key,
+            &config.llm_model,
+            &config.polish_prompt,
+            &transcript,
+        )
+        .await
+    {
         Ok(text) => text,
         Err(err) => {
-            emit_status(&app, &state, "error", err, Some(transcript), None);
+            fail_operation(
+                &app,
+                &state,
+                token,
+                err.user_message(),
+                Some(transcript),
+                None,
+            );
             return;
         }
     };
 
-    if let Err(err) = write_clipboard(&polished) {
-        emit_status(
+    {
+        let mut runtime = match state.runtime.lock() {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+        if runtime.claim_completion(token).is_err() {
+            return;
+        }
+    }
+
+    if let Err(error) = write_clipboard(&polished) {
+        fail_operation(
             &app,
             &state,
-            "error",
-            err,
-            Some(transcript),
-            Some(polished),
+            token,
+            error,
+            Some(transcript.clone()),
+            Some(polished.clone()),
         );
         return;
     }
@@ -627,144 +578,12 @@ async fn run_voice_pipeline(
         }
     }
 
-    emit_status(
-        &app,
-        &state,
-        "done",
-        message,
-        Some(transcript),
-        Some(polished),
-    );
-}
-
-#[derive(Debug, Deserialize)]
-struct SttResponse {
-    text: Option<String>,
-}
-
-async fn transcribe_openai(
-    client: &reqwest::Client,
-    config: &AppConfig,
-    wav_bytes: Vec<u8>,
-) -> Result<String, String> {
-    let url = openai_endpoint(&config.stt_base_url, "audio/transcriptions");
-    let file_part = reqwest::multipart::Part::bytes(wav_bytes)
-        .file_name("voicepen.wav")
-        .mime_str("audio/wav")
-        .map_err(|e| format!("准备音频请求失败：{e}"))?;
-    let form = reqwest::multipart::Form::new()
-        .text("model", config.stt_model.clone())
-        .part("file", file_part);
-
-    let response = client
-        .post(url)
-        .bearer_auth(&config.stt_api_key)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| request_error("STT 转写请求失败", e))?;
-
-    if !response.status().is_success() {
-        return Err(http_error("STT 转写失败", response).await);
-    }
-
-    let payload = response
-        .json::<SttResponse>()
-        .await
-        .map_err(|e| format!("解析 STT 响应失败：{e}"))?;
-    let text = payload.text.unwrap_or_default().trim().to_string();
-    if text.is_empty() {
-        return Err("STT 返回了空文本，请检查模型或音频质量。".to_string());
-    }
-    Ok(text)
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<ChatChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatChoice {
-    message: ChatMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatMessage {
-    content: Option<String>,
-}
-
-async fn polish_openai(
-    client: &reqwest::Client,
-    config: &AppConfig,
-    transcript: &str,
-) -> Result<String, String> {
-    let url = openai_endpoint(&config.llm_base_url, "chat/completions");
-    let body = serde_json::json!({
-        "model": config.llm_model,
-        "messages": [
-            { "role": "system", "content": config.polish_prompt },
-            { "role": "user", "content": transcript }
-        ],
-        "temperature": 0.2
+    let snapshot = state.runtime.lock().ok().and_then(|mut runtime| {
+        runtime.complete(token, message, polished).ok()?;
+        Some(runtime.snapshot())
     });
-
-    let response = client
-        .post(url)
-        .bearer_auth(&config.llm_api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| request_error("LLM 润色请求失败", e))?;
-
-    if !response.status().is_success() {
-        return Err(http_error("LLM 润色失败", response).await);
-    }
-
-    let payload = response
-        .json::<ChatCompletionResponse>()
-        .await
-        .map_err(|e| format!("解析 LLM 响应失败：{e}"))?;
-    let text = payload
-        .choices
-        .first()
-        .and_then(|choice| choice.message.content.as_deref())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if text.is_empty() {
-        return Err("LLM 返回了空文本，请检查模型配置。".to_string());
-    }
-    Ok(text)
-}
-
-fn openai_endpoint(base_url: &str, path: &str) -> String {
-    let base = base_url.trim().trim_end_matches('/');
-    if base.ends_with("/v1") {
-        format!("{base}/{path}")
-    } else {
-        format!("{base}/v1/{path}")
-    }
-}
-
-fn request_error(prefix: &str, err: reqwest::Error) -> String {
-    if err.is_timeout() {
-        format!("{prefix}：请求超时，请检查网络或服务状态。")
-    } else if err.is_connect() {
-        format!("{prefix}：连接失败，请检查 Base URL。")
-    } else {
-        format!("{prefix}：{err}")
-    }
-}
-
-async fn http_error(prefix: &str, response: reqwest::Response) -> String {
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    let body = body.trim();
-    if body.is_empty() {
-        format!("{prefix}（HTTP {status}）。")
-    } else {
-        format!("{prefix}（HTTP {status}）：{body}")
+    if let Some(snapshot) = snapshot {
+        publish_snapshot(&app, snapshot);
     }
 }
 
@@ -778,29 +597,27 @@ fn write_clipboard(text: &str) -> Result<(), String> {
 fn trigger_paste() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let status = Command::new("osascript")
-            .args([
-                "-e",
-                "tell application \"System Events\" to keystroke \"v\" using command down",
-            ])
-            .status()
-            .map_err(|e| format!("无法触发系统粘贴：{e}"))?;
+        let mut command = Command::new("osascript");
+        command.args([
+            "-e",
+            "tell application \"System Events\" to keystroke \"v\" using command down",
+        ]);
+        let status = run_command_with_timeout(&mut command, Duration::from_secs(10))?;
         if status.success() {
             return Ok(());
         }
-        return Err("macOS 拒绝模拟按键，请在系统设置中授予辅助功能权限。".to_string());
+        Err("macOS 拒绝模拟按键，请在系统设置中授予辅助功能权限。".to_string())
     }
 
     #[cfg(target_os = "windows")]
     {
-        let status = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "$wshell = New-Object -ComObject wscript.shell; $wshell.SendKeys('^v')",
-            ])
-            .status()
-            .map_err(|e| format!("无法触发系统粘贴：{e}"))?;
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            "$wshell = New-Object -ComObject wscript.shell; $wshell.SendKeys('^v')",
+        ]);
+        let status = run_command_with_timeout(&mut command, Duration::from_secs(10))?;
         if status.success() {
             return Ok(());
         }
@@ -809,10 +626,9 @@ fn trigger_paste() -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        let status = Command::new("sh")
-            .args(["-lc", "command -v xdotool >/dev/null && xdotool key ctrl+v"])
-            .status()
-            .map_err(|e| format!("无法触发系统粘贴：{e}"))?;
+        let mut command = Command::new("sh");
+        command.args(["-lc", "command -v xdotool >/dev/null && xdotool key ctrl+v"]);
+        let status = run_command_with_timeout(&mut command, Duration::from_secs(10))?;
         if status.success() {
             return Ok(());
         }
@@ -825,36 +641,79 @@ fn trigger_paste() -> Result<(), String> {
     }
 }
 
-fn emit_status(
+fn run_command_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("无法触发系统粘贴：{error}"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(error) => {
+                let cleanup = terminate_child(&mut child);
+                return Err(format!("等待系统粘贴失败：{error}{cleanup}"));
+            }
+        }
+        if Instant::now() >= deadline {
+            let cleanup = terminate_child(&mut child);
+            return Err(format!("系统粘贴响应超时，请手动粘贴剪贴板内容。{cleanup}"));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn terminate_child(child: &mut std::process::Child) -> String {
+    match child.kill() {
+        Ok(()) => child
+            .wait()
+            .err()
+            .map(|error| format!("；回收粘贴进程失败：{error}"))
+            .unwrap_or_default(),
+        Err(error) => format!("；终止粘贴进程失败：{error}"),
+    }
+}
+
+fn fail_operation(
     app: &AppHandle,
     state: &SharedState,
-    stage: impl Into<String>,
+    token: OperationToken,
     message: impl Into<String>,
     transcript: Option<String>,
     polished: Option<String>,
 ) {
-    let config = state
-        .config
+    let changed = state
+        .runtime
         .lock()
-        .map(|config| config.clone())
-        .unwrap_or_default();
-    let snapshot = RuntimeSnapshot {
-        stage: stage.into(),
-        message: message.into(),
-        configured: config.is_configured(),
-        shortcut: config.shortcut,
-        auto_paste: config.auto_paste,
-        theme: config.theme,
-        transcript,
-        polished,
-    };
-    set_runtime_snapshot(app, state, snapshot);
+        .ok()
+        .and_then(|mut runtime| runtime.fail(token, message, transcript, polished).ok())
+        .is_some();
+    if changed {
+        publish_current_runtime(app, state, None);
+    }
 }
 
-fn set_runtime_snapshot(app: &AppHandle, state: &SharedState, snapshot: RuntimeSnapshot) {
+fn reject_runtime(app: &AppHandle, state: &SharedState, message: impl Into<String>) {
     if let Ok(mut runtime) = state.runtime.lock() {
-        *runtime = snapshot.clone();
+        runtime.reject(message);
     }
+    publish_current_runtime(app, state, None);
+}
+
+fn publish_current_runtime(app: &AppHandle, state: &SharedState, message_override: Option<&str>) {
+    let Some(mut snapshot) = state.runtime.lock().ok().map(|runtime| runtime.snapshot()) else {
+        return;
+    };
+    if let Some(message) = message_override {
+        snapshot.message = message.to_string();
+    }
+    publish_snapshot(app, snapshot);
+}
+
+fn publish_snapshot(app: &AppHandle, snapshot: RuntimeSnapshot) {
     let _ = app.emit("voicepen-status", snapshot);
     show_float_window(app);
 }
@@ -930,7 +789,9 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
             .map_err(|e| format!("创建设置窗口失败：{e}"))?
     };
 
-    window.show().map_err(|e| format!("显示设置窗口失败：{e}"))?;
+    window
+        .show()
+        .map_err(|e| format!("显示设置窗口失败：{e}"))?;
     window
         .set_focus()
         .map_err(|e| format!("聚焦设置窗口失败：{e}"))?;
@@ -945,7 +806,11 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
         .build()?;
 
     TrayIconBuilder::with_id("voicepen_tray")
-        .icon(app.default_window_icon().cloned().expect("missing app icon"))
+        .icon(
+            app.default_window_icon()
+                .cloned()
+                .expect("missing app icon"),
+        )
         .icon_as_template(true)
         .tooltip("VoicePen")
         .menu(&menu)
@@ -974,17 +839,26 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let config_path = config_path().expect("无法初始化配置路径");
-    let config = read_config_file(&config_path);
+    let (config, config_load_error) = match read_config_file(&config_path) {
+        Ok(config) => (config, None),
+        Err(error) => (AppConfig::default(), Some(error)),
+    };
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(120))
         .build()
         .expect("无法初始化 HTTP 客户端");
     let state = Arc::new(VoicePenState {
-        runtime: Mutex::new(RuntimeSnapshot::idle(&config)),
+        runtime: Mutex::new(RuntimeState::new(
+            config.is_configured(),
+            config.shortcut.clone(),
+            config.auto_paste,
+            config.theme.clone(),
+        )),
         config: Mutex::new(config),
         recorder: Mutex::new(Recorder::default()),
         registered_shortcut: Mutex::new(None),
+        shortcut_action: Mutex::new(()),
         client,
         config_path,
     });
@@ -1022,6 +896,14 @@ pub fn run() {
                 .unwrap_or_default();
             register_shortcut(&handle, &state, &config.shortcut)
                 .expect("注册 VoicePen 全局快捷键失败");
+            if let Some(error) = config_load_error.as_deref() {
+                reject_runtime(
+                    &handle,
+                    &state,
+                    format!("恢复本地配置失败：{error}。请检查配置目录后重试。"),
+                );
+                let _ = show_settings_window(&handle);
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
