@@ -13,6 +13,8 @@
 
 当前仓库尚无经过签名安装包的双端验收证据，因此以下目标平台均从 `未测` 开始。
 
+实际执行时遵循 [`CLEAN_MACHINE_ACCEPTANCE.md`](./CLEAN_MACHINE_ACCEPTANCE.md)，也可在新 Codex 任务中使用 [`CLEAN_MACHINE_TEST_PROMPT.md`](./CLEAN_MACHINE_TEST_PROMPT.md) 逐步引导。完整 OTA 验收需要两个正式版本：先干净安装基线版本 A，再从 A 升级到更高版本 B。
+
 ## 2. 目标平台
 
 | 平台 | 架构 | 当前状态 | 发布验收要求 |
