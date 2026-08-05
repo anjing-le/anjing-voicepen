@@ -693,7 +693,7 @@ fn trigger_paste() -> Result<(), String> {
         if status.success() {
             return Ok(());
         }
-        return Err("Windows 模拟粘贴失败，请手动粘贴剪贴板内容。".to_string());
+        Err("Windows 模拟粘贴失败，请手动粘贴剪贴板内容。".to_string())
     }
 
     #[cfg(target_os = "linux")]
