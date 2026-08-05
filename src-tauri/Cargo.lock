@@ -4537,9 +4537,11 @@ name = "voicepen"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "base64 0.22.1",
  "cpal",
  "dirs",
  "hound",
+ "minisign-verify",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

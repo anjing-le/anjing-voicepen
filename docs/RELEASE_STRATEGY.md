@@ -10,6 +10,8 @@
 
 Git push 不等于发布。阶段 commit/push 已获持续授权；创建 tag/Release、上传正式产物、使用付费签名能力仍需发布前单独确认。
 
+仓库中的候选发布 workflow 仅允许从 `main` 手工触发，并只创建 Draft Release；详细的环境、签名材料和人工门禁见 [`RELEASE_OPERATIONS.md`](./RELEASE_OPERATIONS.md)。运行候选发布 workflow 本身也会创建 tag、Draft 和外部构建产物，因此仍需事前明确授权。
+
 ## 2. 版本规范
 
 采用语义化版本 `MAJOR.MINOR.PATCH`：

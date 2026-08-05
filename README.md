@@ -83,6 +83,7 @@ config.example.json  Local config shape, no real keys
 - [产品与工程章程](./docs/PROJECT_CHARTER.md)
 - [架构边界](./docs/ARCHITECTURE.md)
 - [发布与更新策略](./docs/RELEASE_STRATEGY.md)
+- [发布操作手册](./docs/RELEASE_OPERATIONS.md)
 - [macOS / Windows 验收矩阵](./docs/PLATFORM_ACCEPTANCE.md)
 - [技术债与历史背景登记](./docs/TECHNICAL_DEBT.md)
 - [贡献指南](./CONTRIBUTING.md)

@@ -8,9 +8,12 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "test:release-script": "node --test scripts/validate-release.test.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "verify:release": "node scripts/validate-release.mjs",
+    "verify:versions": "node scripts/validate-release.mjs --versions-only"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.6.0",
