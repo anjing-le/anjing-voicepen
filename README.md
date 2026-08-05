@@ -18,6 +18,10 @@ VoicePen 是一个很轻的桌面语音输入工具。它只做一件事：把�
 
 它不是聊天助手，不是桌宠，不是知识库，也不是复杂工作台。
 
+项目以 macOS 和 Windows 为正式目标平台。AI 服务采用 BYOK（Bring Your Own Key）：用户选择并配置自己的 OpenAI-compatible STT / LLM 服务，不需要 VoicePen 账号或云端数据库。
+
+> 当前仓库仍处于早期开发阶段，尚未发布经过双端验收的安装包。正式版本将通过 GitHub Releases 发布，并在应用内提供由用户确认的单通道更新。
+
 ## 1. 安装依赖
 
 ```bash
@@ -39,7 +43,7 @@ npm run tauri:dev
 - 是否自动粘贴
 - 皮肤：`light` / `dark` / `system`
 
-配置保存在本机，不需要账号，不需要数据库，不会提交真实 API Key。
+配置仅保存在本机，VoicePen 项目不会收集你的 API Key；发起 AI 请求时，Key 会发送给你配置的服务。切勿将真实 Key 提交到仓库或公开日志。
 
 ## 3. 开始使用
 
@@ -73,6 +77,17 @@ src-tauri/icons/     App icons
 assets/              README assets
 config.example.json  Local config shape, no real keys
 ```
+
+## 项目方向与参与贡献
+
+- [产品与工程章程](./docs/PROJECT_CHARTER.md)
+- [架构边界](./docs/ARCHITECTURE.md)
+- [发布与更新策略](./docs/RELEASE_STRATEGY.md)
+- [技术债与历史背景登记](./docs/TECHNICAL_DEBT.md)
+- [贡献指南](./CONTRIBUTING.md)
+- [变更记录](./CHANGELOG.md)
+
+欢迎通过 Issue 报告问题、提出建议，或通过 Pull Request 贡献改进。产品保持轻量，新增功能需要符合“快捷说话、可靠成文”的核心方向。
 
 ## 常用检查
 
