@@ -36,6 +36,7 @@ import type {
   DiagnosticService,
   ThemeMode,
   UpdateSnapshot,
+  UpdateProgress,
 } from "./types";
 
 const defaultConfig: AppConfig = {
@@ -83,6 +84,7 @@ export default function SettingsApp() {
   const diagnosticGeneration = useRef<Record<DiagnosticService, number>>({ stt: 0, llm: 0 });
   const [updateSnapshot, setUpdateSnapshot] = useState<UpdateSnapshot>(initialUpdateSnapshot);
   const [updateActionError, setUpdateActionError] = useState("");
+  const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total: number | null; finished: boolean } | null>(null);
 
   useEffect(() => {
     getConfig()
@@ -93,6 +95,33 @@ export default function SettingsApp() {
         applyTheme(payload.config.theme);
       })
       .catch((err) => setError(String(err)));
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let stopListening: (() => void) | undefined;
+    void listen<UpdateProgress>("update-progress", (event) => {
+      if (disposed) return;
+      const progress = event.payload;
+      if (progress.event === "Started") {
+        setUpdateProgress({ downloaded: 0, total: progress.data.contentLength, finished: false });
+      } else if (progress.event === "Progress") {
+        setUpdateProgress((current) => ({
+          downloaded: progress.data.downloaded,
+          total: current?.total ?? null,
+          finished: false,
+        }));
+      } else {
+        setUpdateProgress((current) => current ? { ...current, finished: true } : null);
+      }
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stopListening = unlisten;
+    });
+    return () => {
+      disposed = true;
+      stopListening?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -236,6 +265,7 @@ export default function SettingsApp() {
         }));
         setUpdateSnapshot(await checkForUpdate());
       } else if (action === "install") {
+        setUpdateProgress(null);
         setUpdateSnapshot((current) => ({
           ...current,
           stage: "installing",
@@ -264,6 +294,12 @@ export default function SettingsApp() {
       month: "short",
       day: "numeric",
     }).format(date);
+  }
+
+  function formatBytes(value: number) {
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
+    return `${(value / 1024 ** 2).toFixed(1)} MB`;
   }
 
   function renderDiagnostic(service: DiagnosticService) {
@@ -563,6 +599,22 @@ export default function SettingsApp() {
               )}
               <span>{updateActionError || updateSnapshot.message}</span>
             </div>
+            {updateSnapshot.stage === "installing" && updateProgress && (
+              <div className="update-progress" role="status" aria-live="polite">
+                <div className="update-progress-copy">
+                  <span>{updateProgress.finished ? "下载完成，正在安装…" : "正在下载更新"}</span>
+                  <span>
+                    {formatBytes(updateProgress.downloaded)}
+                    {updateProgress.total ? ` / ${formatBytes(updateProgress.total)}` : ""}
+                  </span>
+                </div>
+                <progress
+                  max={updateProgress.total ?? undefined}
+                  value={updateProgress.total ? Math.min(updateProgress.downloaded, updateProgress.total) : undefined}
+                  aria-label="更新下载进度"
+                />
+              </div>
+            )}
             <p className="update-consent-note">只有点击“立即更新”后才会下载和安装；检查更新不会下载安装包。</p>
           </div>
         </section>

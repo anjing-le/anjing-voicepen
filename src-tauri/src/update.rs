@@ -551,4 +551,33 @@ mod tests {
         );
         assert!(UPDATE_ENDPOINT.starts_with("https://"));
     }
+
+    #[test]
+    fn progress_events_match_the_frontend_contract() {
+        assert_eq!(
+            serde_json::to_value(UpdateProgress::Started {
+                content_length: Some(2048),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "event": "Started",
+                "data": { "contentLength": 2048 }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateProgress::Progress {
+                chunk_length: 512,
+                downloaded: 1024,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "event": "Progress",
+                "data": { "chunkLength": 512, "downloaded": 1024 }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateProgress::Finished).unwrap(),
+            serde_json::json!({ "event": "Finished" })
+        );
+    }
 }

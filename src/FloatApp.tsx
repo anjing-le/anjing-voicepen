@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { AlertCircle, Check, Loader2, Mic, Settings, Sparkles } from "lucide-react";
-import { getRuntimeSnapshot, showSettings } from "./tauri";
+import { AlertCircle, Check, CircleArrowDown, Loader2, Mic, Settings, Sparkles } from "lucide-react";
+import { getRuntimeSnapshot, getUpdateSnapshot, showSettings } from "./tauri";
 import { applyTheme } from "./theme";
-import type { RuntimeSnapshot, RuntimeStage } from "./types";
+import type { RuntimeSnapshot, RuntimeStage, UpdateSnapshot } from "./types";
 
 const stageLabel: Record<RuntimeStage, string> = {
   idle: "待命",
@@ -25,9 +25,11 @@ function iconFor(stage: RuntimeStage, configured: boolean) {
 
 export default function FloatApp() {
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot | null>(null);
+  const [updateSnapshot, setUpdateSnapshot] = useState<UpdateSnapshot | null>(null);
 
   useEffect(() => {
     let disposed = false;
+    let stopListeningUpdate: (() => void) | undefined;
     getRuntimeSnapshot()
       .then((next) => {
         if (disposed) return;
@@ -44,11 +46,32 @@ export default function FloatApp() {
       applyTheme(event.payload.theme);
       setSnapshot(event.payload);
     });
+    void (async () => {
+      let receivedUpdateEvent = false;
+      try {
+        const unlisten = await listen<UpdateSnapshot>("update-status", (event) => {
+          if (disposed) return;
+          receivedUpdateEvent = true;
+          setUpdateSnapshot(event.payload);
+        });
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        stopListeningUpdate = unlisten;
+
+        const next = await getUpdateSnapshot();
+        if (!disposed && !receivedUpdateEvent) setUpdateSnapshot(next);
+      } catch {
+        // Update availability is supplementary; keep the voice runtime usable.
+      }
+    })();
 
     return () => {
       disposed = true;
       unlistenStatus.then((unlisten) => unlisten());
       unlistenConfig.then((unlisten) => unlisten());
+      stopListeningUpdate?.();
     };
   }, []);
 
@@ -74,18 +97,30 @@ export default function FloatApp() {
     const current = snapshot;
     const stage = current?.stage ?? "idle";
     const configured = current?.configured ?? false;
+    const updateAvailable = updateSnapshot?.stage === "available";
+    const showUpdate = updateAvailable && (stage === "idle" || !configured);
+    if (showUpdate) {
+      return {
+        stage,
+        configured,
+        Icon: CircleArrowDown,
+        label: "可更新",
+        detail: `v${updateSnapshot.available_version ?? "新版"}`,
+        updateAvailable: true,
+      };
+    }
     const Icon = iconFor(stage, configured);
     const label = configured ? stageLabel[stage] : "配置";
     const detail = configured ? current?.shortcut ?? "Alt+Shift+V" : "VoicePen";
-    return { stage, configured, Icon, label, detail };
-  }, [snapshot]);
+    return { stage, configured, Icon, label, detail, updateAvailable: false };
+  }, [snapshot, updateSnapshot]);
 
   return (
     <button
-      className={`float-pill is-${view.stage} ${view.configured ? "is-configured" : "is-empty"}`}
+      className={`float-pill is-${view.stage} ${view.configured ? "is-configured" : "is-empty"} ${view.updateAvailable ? "has-update" : ""}`}
       onClick={() => void showSettings()}
-      aria-label="打开 VoicePen 设置"
-      title={snapshot?.message || "VoicePen"}
+      aria-label={view.updateAvailable ? "发现新版本，打开 VoicePen 设置查看" : "打开 VoicePen 设置"}
+      title={view.updateAvailable ? "发现新版本，点击查看更新要点" : snapshot?.message || "VoicePen"}
     >
       <span className="float-mark">
         <view.Icon size={17} strokeWidth={2.2} />

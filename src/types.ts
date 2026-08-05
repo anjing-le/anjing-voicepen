@@ -56,6 +56,11 @@ export interface UpdateSnapshot {
   can_install: boolean;
 }
 
+export type UpdateProgress =
+  | { event: "Started"; data: { contentLength: number | null } }
+  | { event: "Progress"; data: { chunkLength: number; downloaded: number } }
+  | { event: "Finished" };
+
 export type RuntimeStage = "idle" | "recording" | "transcribing" | "polishing" | "done" | "error";
 
 export interface RuntimeSnapshot {

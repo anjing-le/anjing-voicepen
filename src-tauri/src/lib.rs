@@ -916,6 +916,19 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct StartupDecision {
+    show_settings: bool,
+    error_message: Option<String>,
+}
+
+fn startup_decision(configured: bool, startup_errors: &[String]) -> StartupDecision {
+    StartupDecision {
+        show_settings: !configured || !startup_errors.is_empty(),
+        error_message: (!startup_errors.is_empty()).then(|| startup_errors.join("；")),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let config_path = config_path().expect("无法初始化配置路径");
@@ -994,12 +1007,55 @@ pub fn run() {
             if let Some(error) = config_load_error.as_deref() {
                 startup_errors.push(format!("恢复本地配置失败：{error}。请检查配置目录后重试。"));
             }
-            if !startup_errors.is_empty() {
-                reject_runtime(&handle, &state, startup_errors.join("；"));
+            let decision = startup_decision(config.is_configured(), &startup_errors);
+            if let Some(error) = decision.error_message {
+                reject_runtime(&handle, &state, error);
+            }
+            if decision.show_settings {
                 let _ = show_settings_window(&handle);
             }
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("VoicePen failed to run");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{startup_decision, StartupDecision};
+
+    #[test]
+    fn configured_startup_stays_in_the_background() {
+        assert_eq!(
+            startup_decision(true, &[]),
+            StartupDecision {
+                show_settings: false,
+                error_message: None,
+            }
+        );
+    }
+
+    #[test]
+    fn unconfigured_startup_opens_settings_without_rejecting_runtime() {
+        assert_eq!(
+            startup_decision(false, &[]),
+            StartupDecision {
+                show_settings: true,
+                error_message: None,
+            }
+        );
+    }
+
+    #[test]
+    fn startup_errors_open_settings_and_preserve_the_combined_error() {
+        let errors = vec!["快捷键注册失败".to_string(), "配置恢复失败".to_string()];
+
+        assert_eq!(
+            startup_decision(true, &errors),
+            StartupDecision {
+                show_settings: true,
+                error_message: Some("快捷键注册失败；配置恢复失败".to_string()),
+            }
+        );
+    }
 }
