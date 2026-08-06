@@ -16,6 +16,8 @@
 <details>
 <summary>开发构建</summary>
 
+开始前请安装 [Tauri 2 前置依赖](https://v2.tauri.app/start/prerequisites/)（Node.js、Rust 及当前系统依赖）；完整验证要求见 [参与贡献](CONTRIBUTING.md)。
+
 ```bash
 npm install
 npm run tauri:dev
