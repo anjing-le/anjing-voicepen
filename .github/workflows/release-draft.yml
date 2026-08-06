@@ -1,0 +1,495 @@
+name: Build release draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version without a v prefix (for example 0.2.0)
+        required: true
+        type: string
+      release_notes:
+        description: User-visible release notes shown in VoicePen
+        required: true
+        type: string
+      release_scope:
+        description: Platforms to stage in the Draft Release
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - macos
+      expected_sha:
+        description: Exact main commit approved for this Draft Release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-draft-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-matrix:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - name: Select the explicit release matrix
+        id: matrix
+        shell: bash
+        env:
+          RELEASE_SCOPE: ${{ inputs.release_scope }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          case "$RELEASE_SCOPE" in
+            macos)
+              value='{"include":[{"platform":"macos-latest","target":"aarch64-apple-darwin","args":"--target aarch64-apple-darwin"},{"platform":"macos-latest","target":"x86_64-apple-darwin","args":"--target x86_64-apple-darwin"}]}'
+              ;;
+            all)
+              value='{"include":[{"platform":"macos-latest","target":"aarch64-apple-darwin","args":"--target aarch64-apple-darwin"},{"platform":"macos-latest","target":"x86_64-apple-darwin","args":"--target x86_64-apple-darwin"},{"platform":"windows-latest","target":"x86_64-pc-windows-msvc","args":"--target x86_64-pc-windows-msvc --config src-tauri/windows-signing.json"}]}'
+              ;;
+            *)
+              echo "Unsupported release scope: $RELEASE_SCOPE" >&2
+              exit 1
+              ;;
+          esac
+          printf 'value=%s\n' "$value" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare-matrix
+    if: github.ref == 'refs/heads/main'
+    environment: release
+    permissions:
+      contents: write
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.prepare-matrix.outputs.matrix) }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust target
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable, pinned 2026-08-05
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build output
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri -> target
+          key: release-${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Validate version, notes, and signing inputs
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+          RELEASE_SCOPE: ${{ inputs.release_scope }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          VOICEPEN_UPDATER_PUBKEY: ${{ vars.VOICEPEN_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_SHA" = "$EXPECTED_SHA"
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test -n "${RELEASE_NOTES//[[:space:]]/}"
+          test -n "$VOICEPEN_UPDATER_PUBKEY"
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          test "$RELEASE_SCOPE" = all || test "$RELEASE_SCOPE" = macos
+          npm run verify:versions
+          node -e "const p=require('./package.json'); if(p.version!==process.env.RELEASE_VERSION) throw new Error('workflow version does not match package.json')"
+          node -e "const c=require('./src-tauri/tauri.conf.json'); if(c.plugins?.updater?.pubkey!==process.env.VOICEPEN_UPDATER_PUBKEY) throw new Error('Tauri updater pubkey does not match release Environment')"
+          node -e "const c=require('./src-tauri/tauri.conf.json'); const e=c.plugins?.updater?.endpoints; if(!Array.isArray(e)||e.length!==1||e[0]!=='https://github.com/anjing-le/anjing-voicepen/releases/latest/download/latest.json') throw new Error('Tauri updater endpoint is not the single production endpoint')"
+          node -e "const n=process.env.RELEASE_NOTES; if([...n].length>8000 || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(n)) throw new Error('release notes violate the application display limits')"
+
+      - name: Verify any existing tag and Release are bound to this request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+          RELEASE_SCOPE: ${{ inputs.release_scope }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          const headers = { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json' };
+          const api = async (path) => fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}${path}`, { headers });
+          const tag = `v${process.env.RELEASE_VERSION}`;
+          let tagCommit = null;
+          let response = await api(`/git/ref/tags/${encodeURIComponent(tag)}`);
+          if (response.ok) {
+            let object = (await response.json()).object;
+            while (object.type === 'tag') {
+              response = await api(`/git/tags/${object.sha}`);
+              if (!response.ok) throw new Error(`cannot dereference existing tag: ${response.status}`);
+              object = (await response.json()).object;
+            }
+            if (object.type !== 'commit') throw new Error(`existing tag resolves to unsupported object type: ${object.type}`);
+            tagCommit = object.sha;
+            if (tagCommit !== process.env.GITHUB_SHA) throw new Error('existing tag does not resolve to GITHUB_SHA');
+          } else if (response.status !== 404) {
+            throw new Error(`cannot inspect existing tag: ${response.status}`);
+          }
+
+          response = await api('/releases?per_page=100');
+          if (!response.ok) throw new Error(`cannot inspect existing Releases: ${response.status}`);
+          const releases = await response.json();
+          if (releases.length >= 100) throw new Error('Release list may be truncated');
+          const release = releases.find((candidate) => candidate.tag_name === tag);
+          if (release) {
+            if (!release.draft || release.prerelease) throw new Error('existing Release must be a non-prerelease draft');
+            if (release.target_commitish !== process.env.GITHUB_SHA) throw new Error('existing Draft target does not match GITHUB_SHA');
+            if (release.name !== `VoicePen ${tag}`) throw new Error('existing Release name does not match this request');
+            if (release.body !== process.env.RELEASE_NOTES) throw new Error('existing Release notes do not match this request');
+            if (release.tag_name !== tag) throw new Error('existing Release tag does not match this request');
+            if (process.env.RELEASE_SCOPE === 'macos') {
+              const assetsResponse = await api(`/releases/${release.id}/assets?per_page=100`);
+              if (!assetsResponse.ok) throw new Error(`cannot inspect existing Release assets: ${assetsResponse.status}`);
+              const assets = await assetsResponse.json();
+              if (assets.length >= 100) throw new Error('existing Release asset list may be truncated');
+              const windowsAsset = assets.find((asset) => /(?:\.(?:exe|msi)|\.(?:nsis|msi)\.zip)(?:\.sig)?$/iu.test(asset.name));
+              if (windowsAsset) throw new Error(`macos scope cannot reuse a Draft containing Windows asset: ${windowsAsset.name}`);
+            }
+          }
+          NODE
+
+      - name: Import Windows code-signing certificate and prepare Tauri config
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ vars.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($name in 'WINDOWS_CERTIFICATE','WINDOWS_CERTIFICATE_PASSWORD','WINDOWS_CERTIFICATE_THUMBPRINT','WINDOWS_TIMESTAMP_URL') {
+            if ([string]::IsNullOrWhiteSpace((Get-Item "Env:$name").Value)) { throw "$name is required" }
+          }
+          if (-not $env:WINDOWS_TIMESTAMP_URL.StartsWith('https://')) { throw 'WINDOWS_TIMESTAMP_URL must use HTTPS' }
+          $pfx = Join-Path $env:RUNNER_TEMP 'voicepen-signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          $actual = $certificate.Thumbprint.ToUpperInvariant()
+          "WINDOWS_IMPORTED_THUMBPRINT=$actual" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $expected = $env:WINDOWS_CERTIFICATE_THUMBPRINT.Replace(' ', '').ToUpperInvariant()
+          if ($actual -ne $expected) { throw 'Imported certificate thumbprint does not match WINDOWS_CERTIFICATE_THUMBPRINT' }
+          @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $expected
+                digestAlgorithm = 'sha256'
+                timestampUrl = $env:WINDOWS_TIMESTAMP_URL
+              }
+            }
+          } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 src-tauri/windows-signing.json
+
+      - name: Build signed updater assets into a draft Release
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VOICEPEN_UPDATER_PUBKEY: ${{ vars.VOICEPEN_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: VoicePen v__VERSION__
+          releaseBody: ${{ inputs.release_notes }}
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          updaterJsonPreferNsis: true
+
+      - name: Verify ad-hoc sealed macOS artifacts
+        if: startsWith(matrix.platform, 'macos-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="src-tauri/target/${{ matrix.target }}/release/bundle"
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) expected_arch="arm64" ;;
+            x86_64-apple-darwin) expected_arch="x86_64" ;;
+            *) echo "Unsupported macOS target: ${{ matrix.target }}" >&2; exit 1 ;;
+          esac
+
+          collect_one() {
+            local description="$1" directory="$2"
+            shift 2
+            local -a matches=()
+            while IFS= read -r -d '' candidate; do matches+=("$candidate"); done \
+              < <(find "$directory" -maxdepth 1 "$@" -print0)
+            if [[ ${#matches[@]} -ne 1 ]]; then
+              echo "Expected exactly one $description, found ${#matches[@]}" >&2
+              return 1
+            fi
+            printf '%s\n' "${matches[0]}"
+          }
+
+          verify_app() {
+            local app="$1" executable_name executable architectures metadata
+            codesign --verify --deep --strict --verbose=4 "$app"
+            metadata=$(codesign --display --verbose=4 "$app" 2>&1)
+            grep -q '^Signature=adhoc$' <<<"$metadata"
+            if grep -q '^Authority=' <<<"$metadata"; then
+              echo 'Ad-hoc artifact unexpectedly contains a certificate authority' >&2
+              return 1
+            fi
+            if grep -Eq '^TeamIdentifier=[A-Z0-9]+$' <<<"$metadata"; then
+              echo 'Ad-hoc artifact unexpectedly contains a TeamIdentifier' >&2
+              return 1
+            fi
+            executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+            test "$executable_name" = voicepen
+            executable="$app/Contents/MacOS/$executable_name"
+            test -f "$executable"
+            architectures=$(lipo -archs "$executable")
+            if [[ "$architectures" != "$expected_arch" ]]; then
+              echo "Expected architecture $expected_arch, found: $architectures" >&2
+              return 1
+            fi
+          }
+
+          app=$(collect_one 'macOS app bundle' "$bundle_root/macos" -type d -name '*.app')
+          updater=$(collect_one 'macOS updater archive' "$bundle_root/macos" -type f -name '*.app.tar.gz')
+          dmg=$(collect_one 'macOS DMG' "$bundle_root/dmg" -type f -name '*.dmg')
+          verify_app "$app"
+
+          extracted="$RUNNER_TEMP/voicepen-updater-${{ matrix.target }}"
+          mkdir -p "$extracted"
+          tar -xzf "$updater" -C "$extracted"
+          extracted_app=$(collect_one 'app bundle inside updater archive' "$extracted" -type d -name '*.app')
+          verify_app "$extracted_app"
+
+          # Tauri seals the app placed in the DMG, not the DMG container itself.
+          if codesign --display --verbose=2 "$dmg" >/dev/null 2>&1; then
+            echo 'DMG unexpectedly gained a code signature; review the release model' >&2
+            exit 1
+          fi
+          mountpoint="$RUNNER_TEMP/voicepen-dmg-${{ matrix.target }}"
+          mkdir -p "$mountpoint"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mountpoint" "$dmg"
+          trap 'hdiutil detach "$mountpoint" >/dev/null 2>&1 || true' EXIT
+          dmg_app=$(collect_one 'app bundle inside DMG' "$mountpoint" -type d -name '*.app')
+          verify_app "$dmg_app"
+          hdiutil detach "$mountpoint"
+          trap - EXIT
+
+      - name: Verify signed and timestamped Windows installers
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleRoot = "src-tauri/target/${{ matrix.target }}/release/bundle"
+          $installers = @(
+            Get-ChildItem (Join-Path $bundleRoot 'nsis') -Filter '*-setup.exe' -File
+            Get-ChildItem (Join-Path $bundleRoot 'msi') -Filter '*.msi' -File
+          )
+          if ($installers.Count -ne 2) { throw "Expected one NSIS and one MSI installer, found $($installers.Count)" }
+          foreach ($installer in $installers) {
+            $signature = Get-AuthenticodeSignature $installer.FullName
+            if ($signature.Status -ne 'Valid') { throw "Invalid Authenticode signature: $($installer.Name)" }
+            if ($null -eq $signature.TimeStamperCertificate) { throw "Missing Authenticode timestamp: $($installer.Name)" }
+            if ($signature.SignerCertificate.Thumbprint -ne $env:WINDOWS_IMPORTED_THUMBPRINT) {
+              throw "Installer signer does not match imported certificate: $($installer.Name)"
+            }
+          }
+
+      - name: Remove temporary Windows signing material
+        if: always() && matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_IMPORTED_THUMBPRINT)) {
+            Remove-Item "Cert:\CurrentUser\My\$env:WINDOWS_IMPORTED_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'voicepen-signing.pfx') -Force -ErrorAction SilentlyContinue
+          Remove-Item 'src-tauri/windows-signing.json' -Force -ErrorAction SilentlyContinue
+
+  finalize-manifest:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment: release
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust verifier toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable, pinned 2026-08-05
+
+      - name: Install validation dependencies
+        run: npm ci
+
+      - name: Reconfirm tag and Draft Release binding
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          const headers = { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json' };
+          const api = async (path) => fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}${path}`, { headers });
+          const tag = `v${process.env.RELEASE_VERSION}`;
+          let response = await api(`/git/ref/tags/${encodeURIComponent(tag)}`);
+          if (response.ok) {
+            let object = (await response.json()).object;
+            while (object.type === 'tag') {
+              response = await api(`/git/tags/${object.sha}`);
+              if (!response.ok) throw new Error(`cannot dereference release tag: ${response.status}`);
+              object = (await response.json()).object;
+            }
+            if (object.type !== 'commit' || object.sha !== process.env.GITHUB_SHA) throw new Error('release tag does not resolve to GITHUB_SHA');
+          } else if (response.status !== 404) {
+            throw new Error(`cannot inspect release tag: ${response.status}`);
+          }
+          response = await api('/releases?per_page=100');
+          if (!response.ok) throw new Error(`cannot inspect Releases: ${response.status}`);
+          const releases = await response.json();
+          if (releases.length >= 100) throw new Error('Release list may be truncated');
+          const release = releases.find((candidate) => candidate.tag_name === tag);
+          if (!release) throw new Error('cannot find draft Release');
+          if (!release.draft || release.prerelease) throw new Error('Release must remain a non-prerelease draft');
+          if (release.tag_name !== tag || release.name !== `VoicePen ${tag}`) throw new Error('Release identity does not match this request');
+          if (release.target_commitish !== process.env.GITHUB_SHA) throw new Error('Draft Release target does not match GITHUB_SHA');
+          if (release.body !== process.env.RELEASE_NOTES) throw new Error('Release notes do not match this request');
+          NODE
+
+      - name: Normalize and validate the updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_SCOPE: ${{ inputs.release_scope }}
+          VOICEPEN_UPDATER_PUBKEY: ${{ vars.VOICEPEN_UPDATER_PUBKEY }}
+        run: |
+          set -euo pipefail
+          tag="v$RELEASE_VERSION"
+          gh release download "$tag" --pattern latest.json --dir "$RUNNER_TEMP/manifest"
+          cp "$RUNNER_TEMP/manifest/latest.json" latest.json
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          (async () => {
+            const manifest = JSON.parse(fs.readFileSync('latest.json', 'utf8'));
+            const scopes = {
+              all: ['darwin-aarch64', 'darwin-x86_64', 'windows-x86_64'],
+              macos: ['darwin-aarch64', 'darwin-x86_64'],
+            };
+            const required = scopes[process.env.RELEASE_SCOPE];
+            if (!required) throw new Error(`unsupported release scope: ${process.env.RELEASE_SCOPE}`);
+            const normalized = {};
+            const headers = { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json' };
+            const releaseResponse = await fetch('https://api.github.com/repos/anjing-le/anjing-voicepen/releases?per_page=100', { headers });
+            if (!releaseResponse.ok) throw new Error(`cannot load Releases: ${releaseResponse.status}`);
+            const releases = await releaseResponse.json();
+            if (releases.length >= 100) throw new Error('Release list may be truncated');
+            const release = releases.find((candidate) => candidate.tag_name === `v${process.env.RELEASE_VERSION}`);
+            if (!release) throw new Error('cannot find draft release');
+            if (!release.draft) throw new Error('release must remain a draft while normalizing latest.json');
+            const assetsResponse = await fetch(`https://api.github.com/repos/anjing-le/anjing-voicepen/releases/${release.id}/assets?per_page=100`, { headers });
+            if (!assetsResponse.ok) throw new Error(`cannot list draft assets: ${assetsResponse.status}`);
+            const assets = await assetsResponse.json();
+            if (assets.length >= 100) throw new Error('draft asset list may be truncated; reduce assets or implement pagination before publishing');
+            const assetNames = new Set();
+            for (const asset of assets) {
+              if (assetNames.has(asset.name)) throw new Error(`duplicate draft asset name: ${asset.name}`);
+              if (asset.state !== 'uploaded' || !Number.isInteger(asset.size) || asset.size <= 0) {
+                throw new Error(`draft asset is not completely uploaded: ${asset.name}`);
+              }
+              assetNames.add(asset.name);
+            }
+            const verificationAssets = {};
+            for (const platform of required) {
+              const entry = manifest.platforms?.[platform];
+              if (!entry?.url || !entry?.signature) throw new Error(`missing updater entry: ${platform}`);
+              const source = new URL(entry.url);
+              let assetName;
+              if (source.hostname === 'api.github.com') {
+                const assetId = source.pathname.split('/').filter(Boolean).at(-1);
+                const response = await fetch(`https://api.github.com/repos/anjing-le/anjing-voicepen/releases/assets/${assetId}`, {
+                  headers,
+                });
+                if (!response.ok) throw new Error(`cannot resolve release asset ${assetId}: ${response.status}`);
+                assetName = (await response.json()).name;
+              } else {
+                assetName = decodeURIComponent(source.pathname.split('/').at(-1));
+              }
+              if (!assetNames.has(assetName)) throw new Error(`manifest asset is absent from draft release: ${assetName}`);
+              const signatureAsset = `${assetName}.sig`;
+              if (!assetNames.has(signatureAsset)) throw new Error(`signature asset is absent from draft release: ${signatureAsset}`);
+              normalized[platform] = {
+                signature: entry.signature,
+                url: `https://github.com/anjing-le/anjing-voicepen/releases/download/v${process.env.RELEASE_VERSION}/${encodeURIComponent(assetName)}`,
+              };
+              verificationAssets[platform] = { assetName, signatureAsset };
+            }
+            manifest.platforms = normalized;
+            fs.writeFileSync('latest.json', `${JSON.stringify(manifest, null, 2)}\n`);
+            fs.writeFileSync('verification-assets.json', `${JSON.stringify(verificationAssets, null, 2)}\n`);
+          })().catch((error) => {
+            console.error(error);
+            process.exitCode = 1;
+          });
+          NODE
+          npm run verify:release -- --manifest latest.json --tag "$tag" --scope "$RELEASE_SCOPE"
+          test -n "$VOICEPEN_UPDATER_PUBKEY"
+          gh release download "$tag" --dir "$RUNNER_TEMP/release-assets"
+          platforms="darwin-aarch64 darwin-x86_64"
+          if test "$RELEASE_SCOPE" = all; then platforms="$platforms windows-x86_64"; fi
+          for platform in $platforms; do
+            asset_name=$(jq -r --arg platform "$platform" '.[$platform].assetName' verification-assets.json)
+            signature_name=$(jq -r --arg platform "$platform" '.[$platform].signatureAsset' verification-assets.json)
+            asset="$RUNNER_TEMP/release-assets/$asset_name"
+            signature_asset="$RUNNER_TEMP/release-assets/$signature_name"
+            test -s "$asset"
+            test -s "$signature_asset"
+            inline_signature=$(jq -r --arg platform "$platform" '.platforms[$platform].signature' latest.json)
+            file_signature=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$signature_asset")
+            test "$(printf '%s' "$inline_signature" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" = "$file_signature"
+            cargo run --locked --manifest-path src-tauri/Cargo.toml --bin verify-update -- \
+              "$VOICEPEN_UPDATER_PUBKEY" "$inline_signature" "$asset"
+          done
+          gh release upload "$tag" latest.json --clobber
+          rm latest.json
+          gh release download "$tag" --pattern latest.json --dir .
+          npm run verify:release -- --manifest latest.json --tag "$tag" --scope "$RELEASE_SCOPE"
+
+      - name: Confirm the Release remains a draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(gh release view "v$RELEASE_VERSION" --json isDraft --jq .isDraft)" = true
+          echo "Signed assets are staged in a draft Release. This workflow never publishes it."
