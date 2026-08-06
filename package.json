@@ -1,7 +1,7 @@
 {
   "name": "anjing-voicepen",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "VoicePen - a lightweight desktop voice input and polishing client",
   "type": "module",
   "scripts": {

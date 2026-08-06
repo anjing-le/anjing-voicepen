@@ -1,6 +1,6 @@
 [package]
 name = "voicepen"
-version = "0.1.0"
+version = "0.1.1"
 description = "VoicePen desktop client"
 authors = ["VoicePen contributors"]
 edition = "2021"
